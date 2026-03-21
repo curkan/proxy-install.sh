@@ -9,7 +9,7 @@
 > - **Порт 443** — Telemt по умолчанию занимает порт 443. Если на нём уже работает nginx, Apache или другой веб-сервер — будет конфликт. Укажи другой порт при установке.
 > - **Порт 1080** — аналогично для 3proxy. Убедись, что порт свободен.
 > - **Существующий 3proxy** — если 3proxy уже установлен, скрипт перезапишет `/etc/3proxy/3proxy.cfg`. Сделай бэкап конфига перед запуском.
-> - **sysctl / limits** — скрипт дописывает параметры в `/etc/sysctl.conf` и `/etc/security/limits.conf`. Повторный запуск дубликатов не создаёт, но значения могут конфликтовать с существующими настройками.
+> - **sysctl / limits** — скрипт создаёт drop-in файлы в `/etc/sysctl.d/` и `/etc/security/limits.d/`. Повторный запуск безопасно перезаписывает их.
 
 ## Быстрый старт
 
@@ -24,6 +24,47 @@ curl -sLO https://raw.githubusercontent.com/curkan/proxy-install.sh/master/proxy
 ```
 
 Скрипт задаст несколько вопросов и всё настроит сам.
+
+## CLI-режим (без промптов)
+
+```bash
+bash proxy-install.sh \
+  --host mt-bel-1.closed.ru \
+  --tls-domain closed.ru \
+  --bot-ip 10.0.0.1
+```
+
+Все параметры:
+
+| Флаг | Описание | По умолчанию |
+|---|---|---|
+| `--host HOST` | Домен или IP сервера | обязательный |
+| `--tls-domain DOMAIN` | Домен для TLS-маскировки | обязательный |
+| `--bot-ip IP` | IP сервера бота (для firewall) | обязательный |
+| `--telemt-port PORT` | Порт Telemt | 443 |
+| `--socks5-port PORT` | Порт SOCKS5 | 1080 |
+| `--agent-port PORT` | Порт proxy-agent | 8080 |
+| `--3proxy-version VER` | Версия 3proxy | 0.9.5 |
+| `--no-telemt` | Не устанавливать Telemt | — |
+| `--no-socks5` | Не устанавливать 3proxy | — |
+
+Только SOCKS5 без Telemt:
+
+```bash
+bash proxy-install.sh \
+  --host 141.98.233.68 \
+  --tls-domain closed.ru \
+  --bot-ip 10.0.0.1 \
+  --no-telemt
+```
+
+## Удаление
+
+```bash
+bash proxy-install.sh --uninstall
+```
+
+Удалит все компоненты, systemd-сервисы, конфиги и системного пользователя. Правила ufw нужно проверить вручную.
 
 ## Требования
 
@@ -41,19 +82,6 @@ curl -sLO https://raw.githubusercontent.com/curkan/proxy-install.sh/master/proxy
 
 Можно поставить оба прокси или только один — скрипт спросит.
 
-## Что спросит скрипт
-
-```
-Домен сервера (DNS → IP этого сервера) [автоопределение IP]:
-Домен для TLS-маскировки (уникальный, не google.com):
-IP сервера бота (для firewall):
-Порт Telemt (MTProxy) [443]:
-Порт SOCKS5 (3proxy) [1080]:
-Порт proxy-agent [8080]:
-Установить Telemt (MTProxy)? [y/n, default: y]:
-Установить 3proxy (SOCKS5)? [y/n, default: y]:
-```
-
 ## После установки
 
 Скрипт выведет токен агента и инструкции для деплоя бинарника:
@@ -66,15 +94,18 @@ ssh root@<IP> 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-a
 ## Структура файлов
 
 ```
-/bin/telemt                       # бинарник Telemt
-/etc/telemt/telemt.toml           # конфиг Telemt
-/var/lib/telemt/                  # рабочая директория Telemt
+/usr/local/bin/telemt                  # бинарник Telemt
+/etc/telemt/telemt.toml                # конфиг Telemt (chmod 640)
+/var/lib/telemt/                       # рабочая директория Telemt
 
-/etc/3proxy/3proxy.cfg            # конфиг 3proxy
-/etc/3proxy/passwd                # логины/пароли (hot-reload)
+/etc/3proxy/3proxy.cfg                 # конфиг 3proxy
+/etc/3proxy/passwd                     # логины/пароли (hot-reload)
 
-/opt/proxy-agent/proxy-agent      # Go-бинарник агента (деплоится отдельно)
-/opt/proxy-agent/env              # переменные окружения (chmod 600)
+/opt/proxy-agent/proxy-agent           # Go-бинарник агента (деплоится отдельно)
+/opt/proxy-agent/env                   # переменные окружения (chmod 600)
+
+/etc/sysctl.d/99-proxy-install.conf    # sysctl-параметры
+/etc/security/limits.d/99-proxy-install.conf  # лимиты
 ```
 
 ## Управление
@@ -102,7 +133,25 @@ cat /etc/3proxy/passwd
 
 ## Повторный запуск
 
-Скрипт идемпотентен — можно запустить повторно для переконфигурации. Системные лимиты и sysctl не дублируются.
+Скрипт идемпотентен — можно запустить повторно для переконфигурации. Drop-in конфиги перезаписываются, ufw-правила не дублируются.
+
+## Development
+
+### Тестирование в Docker (systemd)
+
+Для локальной разработки и отладки скрипт можно запустить в Docker-контейнере с systemd. ufw замокан — iptables хоста не затрагиваются.
+
+```bash
+make test-cli      # установка в CLI-режиме
+make test-smoke    # установка + автоматические проверки
+make test-uninstall # установка → проверка → удаление → проверка
+make exec          # зайти в контейнер для отладки
+make down          # остановить контейнер
+make clean         # удалить контейнер и образ
+```
+
+> Требует Docker. Контейнер запускается с `--privileged` для systemd.
+> Не заменяет тестирование на реальной VM перед релизом.
 
 ## Лицензия
 

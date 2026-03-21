@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 #
 # proxy-install.sh — установщик Telemt + 3proxy + proxy-agent
-# Использование: wget -qO proxy-install.sh URL && bash proxy-install.sh
+#
+# Интерактивный режим:
+#   wget -qO proxy-install.sh URL && bash proxy-install.sh
+#
+# CLI режим (без промптов):
+#   bash proxy-install.sh \
+#     --host mt-bel-1.closed.ru \
+#     --tls-domain closed.ru \
+#     --bot-ip 10.0.0.1 \
+#     --telemt \
+#     --socks5
+#
+# Удаление:
+#   bash proxy-install.sh --uninstall
 #
 
 set -euo pipefail
@@ -25,6 +38,24 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
 header()  { echo -e "\n${BOLD}${BLUE}━━━ $* ━━━${NC}\n"; }
 
+# ─── Cleanup при ошибке ─────────────────────────────────────────────────────
+
+CLEANUP_FILES=()
+
+cleanup() {
+	local exit_code=$?
+	for f in "${CLEANUP_FILES[@]}"; do
+		rm -f "$f" 2>/dev/null
+	done
+	if [[ $exit_code -ne 0 ]]; then
+		echo ""
+		error "Скрипт завершился с ошибкой (код $exit_code)"
+		error "Проверь вывод выше для диагностики"
+	fi
+}
+
+trap cleanup EXIT
+
 # ─── Версии ───────────────────────────────────────────────────────────────────
 
 TELEMT_VERSION="latest"
@@ -32,6 +63,29 @@ PROXY_3PROXY_VERSION="0.9.5"
 AGENT_PORT_DEFAULT="8080"
 TELEMT_PORT_DEFAULT="443"
 SOCKS5_PORT_DEFAULT="1080"
+
+# ─── Валидация ввода ─────────────────────────────────────────────────────────
+
+validate_domain() {
+	local val="$1"
+	if [[ ! "$val" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+		die "Некорректный домен/хост: '$val'. Допустимы буквы, цифры, точки, дефисы"
+	fi
+}
+
+validate_ip() {
+	local val="$1"
+	if [[ ! "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		die "Некорректный IP-адрес: '$val'. Формат: x.x.x.x"
+	fi
+}
+
+validate_port() {
+	local val="$1"
+	if [[ ! "$val" =~ ^[0-9]+$ ]] || [[ "$val" -lt 1 ]] || [[ "$val" -gt 65535 ]]; then
+		die "Некорректный порт: '$val'. Допустимый диапазон: 1-65535"
+	fi
+}
 
 # ─── Проверки ─────────────────────────────────────────────────────────────────
 
@@ -62,10 +116,26 @@ check_arch() {
 # ─── Получение публичного IP ──────────────────────────────────────────────────
 
 get_public_ip() {
-	PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
-	            curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
-	            echo "")
-	echo "$PUBLIC_IP"
+	local ip
+	ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+	     curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
+	     echo "")
+	# Валидация: только IPv4
+	if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		echo "$ip"
+	else
+		echo ""
+	fi
+}
+
+# ─── Определение libc ───────────────────────────────────────────────────────
+
+detect_libc() {
+	if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+		echo "musl"
+	else
+		echo "gnu"
+	fi
 }
 
 # ─── Интерактивный ввод ───────────────────────────────────────────────────────
@@ -82,7 +152,9 @@ prompt() {
 	else
 		while [[ -z "${value:-}" ]]; do
 			read -r -p "$(echo -e "${BOLD}${prompt_text}${NC}: ")" value
-			[[ -z "$value" ]] && warn "Значение обязательно"
+			if [[ -z "$value" ]]; then
+				warn "Значение обязательно"
+			fi
 		done
 	fi
 
@@ -96,7 +168,7 @@ prompt_yes_no() {
 	local value
 
 	while true; do
-		read -r -p "$(echo -e "${BOLD}${prompt_text}${NC} [y/n, default: ${default}]: ")" value < /dev/tty
+		read -r -p "$(echo -e "${BOLD}${prompt_text}${NC} [y/n, default: ${default}]: ")" value
 		value="${value:-$default}"
 		case "${value,,}" in
 			y|yes) printf -v "$var_name" 'true';  return ;;
@@ -106,9 +178,83 @@ prompt_yes_no() {
 	done
 }
 
+# ─── Парсинг CLI-аргументов ──────────────────────────────────────────────────
+
+CLI_MODE="false"
+UNINSTALL_MODE="false"
+
+parse_args() {
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--host)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				PUBLIC_HOST="$2"; shift 2 ;;
+			--tls-domain)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				TLS_DOMAIN="$2"; shift 2 ;;
+			--bot-ip)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				BOT_SERVER_IP="$2"; shift 2 ;;
+			--telemt-port)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				TELEMT_PORT="$2"; shift 2 ;;
+			--socks5-port)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				SOCKS5_PORT="$2"; shift 2 ;;
+			--agent-port)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				AGENT_PORT="$2"; shift 2 ;;
+			--3proxy-version)
+				[[ $# -ge 2 ]] || die "Аргумент $1 требует значения"
+				PROXY_3PROXY_VERSION="$2"; shift 2 ;;
+			--telemt)        INSTALL_TELEMT="true";  shift ;;
+			--socks5)        INSTALL_SOCKS5="true";  shift ;;
+			--no-telemt)     INSTALL_TELEMT="false"; shift ;;
+			--no-socks5)     INSTALL_SOCKS5="false"; shift ;;
+			--uninstall)     UNINSTALL_MODE="true";  shift ;;
+			-h|--help)       usage; exit 0 ;;
+			*) die "Неизвестный аргумент: $1" ;;
+		esac
+	done
+
+	# Если передан хотя бы --host, считаем CLI-режим
+	if [[ -n "${PUBLIC_HOST:-}" ]]; then
+		CLI_MODE="true"
+	fi
+}
+
+usage() {
+	cat << 'EOF'
+Использование: bash proxy-install.sh [ОПЦИИ]
+
+Без аргументов — интерактивный режим.
+
+Опции:
+  --host HOST            Домен или IP сервера (обязательно для CLI)
+  --tls-domain DOMAIN    Домен для TLS-маскировки (обязательно для CLI)
+  --bot-ip IP            IP сервера бота для firewall (обязательно для CLI)
+  --telemt-port PORT     Порт Telemt (по умолчанию: 443)
+  --socks5-port PORT     Порт SOCKS5 (по умолчанию: 1080)
+  --agent-port PORT      Порт proxy-agent (по умолчанию: 8080)
+  --3proxy-version VER   Версия 3proxy (по умолчанию: 0.9.5)
+  --telemt               Установить Telemt (по умолчанию: да)
+  --socks5               Установить 3proxy (по умолчанию: да)
+  --no-telemt            Не устанавливать Telemt
+  --no-socks5            Не устанавливать 3proxy
+  --uninstall            Удалить все компоненты
+  -h, --help             Показать справку
+
+Пример:
+  bash proxy-install.sh \
+    --host mt-bel-1.closed.ru \
+    --tls-domain closed.ru \
+    --bot-ip 10.0.0.1
+EOF
+}
+
 # ─── Сбор конфигурации ────────────────────────────────────────────────────────
 
-collect_config() {
+collect_config_interactive() {
 	header "Конфигурация"
 
 	local detected_ip
@@ -129,11 +275,56 @@ collect_config() {
 	prompt_yes_no INSTALL_TELEMT "Установить Telemt (MTProxy)?" "y"
 	prompt_yes_no INSTALL_SOCKS5 "Установить 3proxy (SOCKS5)?"  "y"
 
+	# Валидация
+	validate_all_inputs
+
 	echo ""
 	info "Генерирую токен агента..."
 	AGENT_TOKEN=$(openssl rand -hex 32)
 
 	echo ""
+	print_config
+
+	local confirm
+	prompt_yes_no confirm "Продолжить установку?" "y"
+	if [[ "$confirm" == "false" ]]; then
+		info "Установка отменена"
+		exit 0
+	fi
+}
+
+collect_config_cli() {
+	# Дефолты для не указанных параметров
+	TELEMT_PORT="${TELEMT_PORT:-$TELEMT_PORT_DEFAULT}"
+	SOCKS5_PORT="${SOCKS5_PORT:-$SOCKS5_PORT_DEFAULT}"
+	AGENT_PORT="${AGENT_PORT:-$AGENT_PORT_DEFAULT}"
+	INSTALL_TELEMT="${INSTALL_TELEMT:-true}"
+	INSTALL_SOCKS5="${INSTALL_SOCKS5:-true}"
+
+	# Обязательные параметры
+	[[ -z "${PUBLIC_HOST:-}" ]]   && die "Не указан --host"
+	[[ -z "${TLS_DOMAIN:-}" ]]    && die "Не указан --tls-domain"
+	[[ -z "${BOT_SERVER_IP:-}" ]] && die "Не указан --bot-ip"
+
+	# Валидация
+	validate_all_inputs
+
+	AGENT_TOKEN=$(openssl rand -hex 32)
+
+	header "Конфигурация (CLI)"
+	print_config
+}
+
+validate_all_inputs() {
+	validate_domain "$PUBLIC_HOST"
+	validate_domain "$TLS_DOMAIN"
+	validate_ip "$BOT_SERVER_IP"
+	validate_port "$TELEMT_PORT"
+	validate_port "$SOCKS5_PORT"
+	validate_port "$AGENT_PORT"
+}
+
+print_config() {
 	echo -e "${BOLD}Конфигурация:${NC}"
 	echo -e "  Домен сервера:       ${CYAN}${PUBLIC_HOST}${NC}"
 	echo -e "  TLS маскировка:      ${CYAN}${TLS_DOMAIN}${NC}"
@@ -144,10 +335,6 @@ collect_config() {
 	echo -e "  Установить Telemt:   ${CYAN}${INSTALL_TELEMT}${NC}"
 	echo -e "  Установить SOCKS5:   ${CYAN}${INSTALL_SOCKS5}${NC}"
 	echo ""
-
-	local confirm
-	prompt_yes_no confirm "Продолжить установку?" "y"
-	[[ "$confirm" == "false" ]] && { info "Установка отменена"; exit 0; }
 }
 
 # ─── Системные настройки ──────────────────────────────────────────────────────
@@ -162,25 +349,19 @@ setup_system() {
 	apt-get install -y -qq curl wget xxd openssl ufw
 
 	info "Настраиваем лимиты файловых дескрипторов..."
-	if ! grep -q '# proxy-install' /etc/security/limits.conf 2>/dev/null; then
-		cat >> /etc/security/limits.conf << 'EOF'
-# proxy-install
+	cat > /etc/security/limits.d/99-proxy-install.conf << 'EOF'
 nobody  soft  nofile  65536
 nobody  hard  nofile  65536
 *       soft  nofile  65536
 *       hard  nofile  65536
 EOF
-	fi
 
-	if ! grep -q '# proxy-install' /etc/sysctl.conf 2>/dev/null; then
-		cat >> /etc/sysctl.conf << 'EOF'
-# proxy-install
+	cat > /etc/sysctl.d/99-proxy-install.conf << 'EOF'
 fs.file-max = 1000000
 net.ipv4.tcp_tw_reuse = 1
 net.core.somaxconn = 65535
 EOF
-	fi
-	sysctl -p -q
+	sysctl --system -q
 
 	success "Системные настройки применены"
 }
@@ -192,17 +373,20 @@ install_telemt() {
 
 	info "Скачиваем бинарник Telemt..."
 	local libc_type
-	libc_type=$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu)
+	libc_type=$(detect_libc)
 	local arch
 	arch=$(uname -m)
 
-	wget -qO /tmp/telemt.tar.gz \
+	local tmp_archive="/tmp/telemt.tar.gz"
+	CLEANUP_FILES+=("$tmp_archive")
+
+	wget -qO "$tmp_archive" \
 		"https://github.com/telemt/telemt/releases/latest/download/telemt-${arch}-linux-${libc_type}.tar.gz"
-	tar -xzf /tmp/telemt.tar.gz -C /tmp
-	mv /tmp/telemt /bin/telemt
-	chmod +x /bin/telemt
-	rm -f /tmp/telemt.tar.gz
-	success "Telemt установлен: $(/bin/telemt --version 2>/dev/null || echo 'ok')"
+	tar -xzf "$tmp_archive" -C /tmp
+	mv /tmp/telemt /usr/local/bin/telemt
+	chmod +x /usr/local/bin/telemt
+	rm -f "$tmp_archive"
+	success "Telemt установлен: $(/usr/local/bin/telemt --version 2>/dev/null || echo 'ok')"
 
 	info "Создаём конфигурацию..."
 	mkdir -p /etc/telemt /var/lib/telemt
@@ -249,7 +433,7 @@ EOF
 
 	chown nobody:nogroup /etc/telemt
 	chown nobody:nogroup /etc/telemt/telemt.toml
-	chmod 664 /etc/telemt/telemt.toml
+	chmod 640 /etc/telemt/telemt.toml
 	chown nobody:nogroup /var/lib/telemt
 
 	info "Создаём systemd-сервис..."
@@ -263,7 +447,7 @@ Wants=network-online.target
 Type=simple
 User=nobody
 WorkingDirectory=/var/lib/telemt
-ExecStart=/bin/telemt /etc/telemt/telemt.toml
+ExecStart=/usr/local/bin/telemt /etc/telemt/telemt.toml
 Restart=on-failure
 LimitNOFILE=65536
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -276,13 +460,11 @@ EOF
 
 	systemctl daemon-reload
 	systemctl enable telemt
-	systemctl start telemt
 
-	if systemctl is-active --quiet telemt; then
-		success "Telemt запущен"
-	else
-		error "Telemt не запустился. Проверь: journalctl -u telemt -n 20"
+	if ! systemctl start telemt; then
+		die "Telemt не запустился. Проверь: journalctl -u telemt -n 20"
 	fi
+	success "Telemt запущен"
 }
 
 # ─── Установка 3proxy ─────────────────────────────────────────────────────────
@@ -291,14 +473,23 @@ install_3proxy() {
 	header "Установка 3proxy (SOCKS5)"
 
 	info "Скачиваем 3proxy ${PROXY_3PROXY_VERSION}..."
-	wget -qO /tmp/3proxy.deb \
+	local tmp_deb="/tmp/3proxy.deb"
+	CLEANUP_FILES+=("$tmp_deb")
+
+	wget -qO "$tmp_deb" \
 		"https://github.com/3proxy/3proxy/releases/download/${PROXY_3PROXY_VERSION}/3proxy-${PROXY_3PROXY_VERSION}.x86_64.deb"
-	dpkg -i /tmp/3proxy.deb > /dev/null 2>&1 || true
-	rm -f /tmp/3proxy.deb
+
+	dpkg -i "$tmp_deb" > /dev/null 2>&1 || apt-get install -f -y -qq
+	rm -f "$tmp_deb"
+
+	# Проверяем что пакет установлен
+	if ! dpkg -s 3proxy &>/dev/null; then
+		die "3proxy не установился. Проверь вывод выше"
+	fi
 	success "3proxy установлен"
 
 	info "Создаём конфигурацию..."
-	mkdir -p /etc/3proxy
+	mkdir -p /etc/3proxy /usr/local/3proxy/logs /usr/local/3proxy/count
 	touch /etc/3proxy/passwd
 
 	cat > /etc/3proxy/3proxy.cfg << EOF
@@ -323,14 +514,12 @@ socks -p${SOCKS5_PORT}
 flush
 EOF
 
-	systemctl start 3proxy
 	systemctl enable 3proxy
 
-	if systemctl is-active --quiet 3proxy; then
-		success "3proxy запущен на порту ${SOCKS5_PORT}"
-	else
-		error "3proxy не запустился. Проверь: journalctl -u 3proxy -n 20"
+	if ! systemctl start 3proxy; then
+		die "3proxy не запустился. Проверь: journalctl -u 3proxy -n 20"
 	fi
+	success "3proxy запущен на порту ${SOCKS5_PORT}"
 }
 
 # ─── Подготовка proxy-agent ───────────────────────────────────────────────────
@@ -339,6 +528,11 @@ setup_agent() {
 	header "Подготовка proxy-agent"
 
 	mkdir -p /opt/proxy-agent
+
+	# Создаём системного пользователя для агента
+	if ! id proxy-agent &>/dev/null; then
+		useradd --system --no-create-home --shell /usr/sbin/nologin proxy-agent
+	fi
 
 	cat > /opt/proxy-agent/env << EOF
 AGENT_TOKEN=${AGENT_TOKEN}
@@ -357,18 +551,22 @@ EOF
 SOCKS5_PASSWD_FILE=/etc/3proxy/passwd
 SOCKS5_PID_FILE=/var/run/3proxy.pid
 EOF
+		# Даём proxy-agent доступ к файлу паролей
+		chown root:proxy-agent /etc/3proxy/passwd
+		chmod 660 /etc/3proxy/passwd
 	fi
 
 	chmod 600 /opt/proxy-agent/env
-	chown root:root /opt/proxy-agent/env
+	chown proxy-agent:proxy-agent /opt/proxy-agent/env
+	chown proxy-agent:proxy-agent /opt/proxy-agent
 
-	cat > /etc/systemd/system/proxy-agent.service << EOF
+	cat > /etc/systemd/system/proxy-agent.service << 'EOF'
 [Unit]
 Description=Proxy Agent
 After=network.target telemt.service 3proxy.service
 
 [Service]
-User=root
+User=proxy-agent
 WorkingDirectory=/opt/proxy-agent
 EnvironmentFile=/opt/proxy-agent/env
 ExecStart=/opt/proxy-agent/proxy-agent
@@ -389,33 +587,46 @@ EOF
 
 # ─── Настройка firewall ───────────────────────────────────────────────────────
 
+ufw_allow() {
+	local rule="$*"
+	if ! ufw status | grep -q "$rule" 2>/dev/null; then
+		ufw allow $rule > /dev/null
+	fi
+}
+
+ufw_allow_from() {
+	local from_ip="$1"
+	local port="$2"
+	local comment="$3"
+	if ! ufw status | grep -q "$port.*$from_ip" 2>/dev/null; then
+		ufw allow from "$from_ip" to any port "$port" comment "$comment" > /dev/null
+	fi
+}
+
 setup_firewall() {
 	header "Настройка firewall (ufw)"
 
 	ufw default deny incoming > /dev/null
 	ufw default allow outgoing > /dev/null
 
-	ufw allow 22/tcp comment "SSH"
+	ufw_allow "22/tcp comment SSH"
 
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
-		ufw allow "${TELEMT_PORT}/tcp" comment "Telemt MTProxy"
+		ufw_allow "${TELEMT_PORT}/tcp comment 'Telemt MTProxy'"
 	fi
 
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
 		if [[ -n "$BOT_SERVER_IP" ]]; then
-			ufw allow from "$BOT_SERVER_IP" to any port "$SOCKS5_PORT" comment "SOCKS5 from bot"
+			ufw_allow_from "$BOT_SERVER_IP" "$SOCKS5_PORT" "SOCKS5 from bot"
 		else
-			ufw allow "${SOCKS5_PORT}/tcp" comment "SOCKS5"
+			ufw_allow "${SOCKS5_PORT}/tcp comment SOCKS5"
 			warn "SOCKS5 открыт для всех IP. Рекомендуется ограничить по IP бота"
 		fi
 	fi
 
 	if [[ -n "$BOT_SERVER_IP" ]]; then
-		ufw allow from "$BOT_SERVER_IP" to any port "$AGENT_PORT" comment "proxy-agent from bot"
+		ufw_allow_from "$BOT_SERVER_IP" "$AGENT_PORT" "proxy-agent from bot"
 	fi
-
-	# Telemt API — только localhost
-	ufw deny 9091 comment "Telemt API — только localhost" > /dev/null
 
 	ufw --force enable > /dev/null
 	success "Firewall настроен"
@@ -431,32 +642,40 @@ print_summary() {
 
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
 		echo -e "${BOLD}Telemt (MTProxy):${NC}"
-		echo -e "  Сервер: ${CYAN}${PUBLIC_HOST}${NC}"
-		echo -e "  Порт:   ${CYAN}${TELEMT_PORT}${NC}"
-		echo -e "  Ссылки выводятся в логах: ${CYAN}journalctl -u telemt | grep 'EE-TLS\|DD:'${NC}"
+		echo -e "  Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
+		echo -e "  Порт:    ${CYAN}${TELEMT_PORT}${NC}"
+		echo -e "  Ссылки:  ${CYAN}journalctl -u telemt | grep 'EE-TLS\|DD:'${NC}"
 		echo ""
 	fi
 
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
 		echo -e "${BOLD}3proxy (SOCKS5):${NC}"
-		echo -e "  Сервер: ${CYAN}${PUBLIC_HOST}${NC}"
-		echo -e "  Порт:   ${CYAN}${SOCKS5_PORT}${NC}"
-		echo -e "  Логин/пароль: ${CYAN}из /etc/3proxy/passwd${NC}"
+		echo -e "  Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
+		echo -e "  Порт:    ${CYAN}${SOCKS5_PORT}${NC}"
+		echo -e "  Пароли:  ${CYAN}/etc/3proxy/passwd${NC}"
 		echo ""
 	fi
 
 	echo -e "${BOLD}proxy-agent:${NC}"
-	echo -e "  Порт:      ${CYAN}${AGENT_PORT}${NC}"
-	echo -e "  Токен:     ${CYAN}${AGENT_TOKEN}${NC}"
+	echo -e "  Порт:     ${CYAN}${AGENT_PORT}${NC}"
+	echo -e "  Токен:    ${CYAN}${AGENT_TOKEN}${NC}"
 	local backends=""
-	[[ "$INSTALL_TELEMT" == "true" ]] && backends+="telemt"
-	[[ "$INSTALL_SOCKS5" == "true" ]] && backends+="${backends:+, }socks5"
-	echo -e "  Бэкенды:  ${CYAN}${backends}${NC}"
+	if [[ "$INSTALL_TELEMT" == "true" ]]; then
+		backends+="telemt"
+	fi
+	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
+		backends+="${backends:+, }socks5"
+	fi
+	echo -e "  Бэкенды: ${CYAN}${backends}${NC}"
 	echo ""
 
-	echo -e "${BOLD}Конфиги сохранены в:${NC}"
-	[[ "$INSTALL_TELEMT" == "true" ]] && echo -e "  ${CYAN}/etc/telemt/telemt.toml${NC}"
-	[[ "$INSTALL_SOCKS5" == "true" ]] && echo -e "  ${CYAN}/etc/3proxy/3proxy.cfg${NC}"
+	echo -e "${BOLD}Конфиги:${NC}"
+	if [[ "$INSTALL_TELEMT" == "true" ]]; then
+		echo -e "  ${CYAN}/etc/telemt/telemt.toml${NC}"
+	fi
+	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
+		echo -e "  ${CYAN}/etc/3proxy/3proxy.cfg${NC}"
+	fi
 	echo -e "  ${CYAN}/opt/proxy-agent/env${NC}"
 	echo ""
 
@@ -468,24 +687,95 @@ print_summary() {
 	echo -e "  ${CYAN}ssh root@${PUBLIC_HOST} 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-agent && systemctl start proxy-agent'${NC}"
 }
 
+# ─── Удаление ────────────────────────────────────────────────────────────────
+
+uninstall() {
+	header "Удаление proxy-install"
+
+	# Telemt
+	if systemctl is-active --quiet telemt 2>/dev/null; then
+		info "Останавливаю Telemt..."
+		systemctl stop telemt
+	fi
+	if [[ -f /etc/systemd/system/telemt.service ]]; then
+		systemctl disable telemt 2>/dev/null || true
+		rm -f /etc/systemd/system/telemt.service
+	fi
+	rm -f /usr/local/bin/telemt
+	rm -rf /etc/telemt /var/lib/telemt
+
+	# 3proxy
+	if systemctl is-active --quiet 3proxy 2>/dev/null; then
+		info "Останавливаю 3proxy..."
+		systemctl stop 3proxy
+	fi
+	if dpkg -s 3proxy &>/dev/null; then
+		dpkg -r 3proxy 2>/dev/null || true
+	fi
+	rm -rf /etc/3proxy
+
+	# proxy-agent
+	if systemctl is-active --quiet proxy-agent 2>/dev/null; then
+		info "Останавливаю proxy-agent..."
+		systemctl stop proxy-agent
+	fi
+	if [[ -f /etc/systemd/system/proxy-agent.service ]]; then
+		systemctl disable proxy-agent 2>/dev/null || true
+		rm -f /etc/systemd/system/proxy-agent.service
+	fi
+	rm -rf /opt/proxy-agent
+
+	# Системный пользователь
+	if id proxy-agent &>/dev/null; then
+		userdel proxy-agent 2>/dev/null || true
+	fi
+
+	# Drop-in конфиги
+	rm -f /etc/sysctl.d/99-proxy-install.conf
+	rm -f /etc/security/limits.d/99-proxy-install.conf
+
+	systemctl daemon-reload
+	sysctl --system -q 2>/dev/null || true
+
+	success "Все компоненты удалены"
+	info "Правила ufw не удалены — проверь вручную: ufw status numbered"
+}
+
 # ─── Главная функция ──────────────────────────────────────────────────────────
 
 main() {
 	echo -e "${BOLD}${BLUE}"
-	echo "  ┌─────────────────────────────────────┐"
-	echo "  │       proxy-install v1.0.0          │"
+	echo "  ┌──────────────────────────────────────┐"
+	echo "  │        proxy-install v1.0.0          │"
 	echo "  │  Telemt + 3proxy + proxy-agent       │"
-	echo "  └─────────────────────────────────────┘"
+	echo "  └──────────────────────────────────────┘"
 	echo -e "${NC}"
+
+	parse_args "$@"
 
 	check_root
 	check_os
 	check_arch
-	collect_config
+
+	if [[ "$UNINSTALL_MODE" == "true" ]]; then
+		uninstall
+		return
+	fi
+
+	if [[ "$CLI_MODE" == "true" ]]; then
+		collect_config_cli
+	else
+		collect_config_interactive
+	fi
+
 	setup_system
 
-	[[ "$INSTALL_TELEMT" == "true" ]] && install_telemt
-	[[ "$INSTALL_SOCKS5" == "true" ]] && install_3proxy
+	if [[ "$INSTALL_TELEMT" == "true" ]]; then
+		install_telemt
+	fi
+	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
+		install_3proxy
+	fi
 
 	setup_agent
 	setup_firewall

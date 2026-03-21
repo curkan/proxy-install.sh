@@ -1,0 +1,15 @@
+FROM jrei/systemd-ubuntu:24.04
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq curl wget openssl ufw xxd && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Мок ufw — в контейнере с --privileged реальный ufw мутирует iptables хоста
+RUN mv /usr/sbin/ufw /usr/sbin/ufw.real && \
+    printf '#!/bin/bash\necho "[MOCK UFW] $@" >> /var/log/ufw-mock.log\n' > /usr/sbin/ufw && \
+    chmod +x /usr/sbin/ufw
+
+COPY proxy-install.sh /opt/proxy-install.sh
+RUN chmod +x /opt/proxy-install.sh
+
+EXPOSE 443 1080 8080

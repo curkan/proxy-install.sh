@@ -1,7 +1,9 @@
 # proxy-install.sh
 
+![proxy-install.sh](misc/proxy-install.png)
+
 Интерактивный установщик прокси-сервера на Ubuntu/Debian.
-Ставит **Telemt** (MTProxy с Fake-TLS) и/или **3proxy** (SOCKS5), настраивает firewall и готовит конфиг для proxy-agent.
+Ставит **Telemt** (MTProxy с Fake-TLS) и/или **3proxy** (SOCKS5), настраивает firewall и разворачивает [proxy-agent](https://github.com/curkan/proxy-agent).
 
 > **Рекомендуется запускать на чистом сервере.** На существующей системе учитывай следующее:
 >

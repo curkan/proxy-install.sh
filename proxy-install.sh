@@ -284,6 +284,7 @@ collect_config_interactive() {
 
 	echo ""
 	print_config
+	print_cli_command
 
 	local confirm
 	prompt_yes_no confirm "Продолжить установку?" "y"
@@ -334,6 +335,30 @@ print_config() {
 	echo -e "  Порт агента:         ${CYAN}${AGENT_PORT}${NC}"
 	echo -e "  Установить Telemt:   ${CYAN}${INSTALL_TELEMT}${NC}"
 	echo -e "  Установить SOCKS5:   ${CYAN}${INSTALL_SOCKS5}${NC}"
+	echo ""
+}
+
+print_cli_command() {
+	local cmd="bash proxy-install.sh --host ${PUBLIC_HOST} --tls-domain ${TLS_DOMAIN} --bot-ip ${BOT_SERVER_IP}"
+
+	if [[ "$TELEMT_PORT" != "$TELEMT_PORT_DEFAULT" ]]; then
+		cmd+=" --telemt-port ${TELEMT_PORT}"
+	fi
+	if [[ "$SOCKS5_PORT" != "$SOCKS5_PORT_DEFAULT" ]]; then
+		cmd+=" --socks5-port ${SOCKS5_PORT}"
+	fi
+	if [[ "$AGENT_PORT" != "$AGENT_PORT_DEFAULT" ]]; then
+		cmd+=" --agent-port ${AGENT_PORT}"
+	fi
+	if [[ "$INSTALL_TELEMT" == "false" ]]; then
+		cmd+=" --no-telemt"
+	fi
+	if [[ "$INSTALL_SOCKS5" == "false" ]]; then
+		cmd+=" --no-socks5"
+	fi
+
+	echo -e "${BOLD}Команда для повторного запуска:${NC}"
+	echo -e "  ${CYAN}${cmd}${NC}"
 	echo ""
 }
 
@@ -587,45 +612,29 @@ EOF
 
 # ─── Настройка firewall ───────────────────────────────────────────────────────
 
-ufw_allow() {
-	local rule="$*"
-	if ! ufw status | grep -q "$rule" 2>/dev/null; then
-		ufw allow $rule > /dev/null
-	fi
-}
-
-ufw_allow_from() {
-	local from_ip="$1"
-	local port="$2"
-	local comment="$3"
-	if ! ufw status | grep -q "$port.*$from_ip" 2>/dev/null; then
-		ufw allow from "$from_ip" to any port "$port" comment "$comment" > /dev/null
-	fi
-}
-
 setup_firewall() {
 	header "Настройка firewall (ufw)"
 
 	ufw default deny incoming > /dev/null
 	ufw default allow outgoing > /dev/null
 
-	ufw_allow "22/tcp comment SSH"
+	ufw allow 22/tcp > /dev/null 2>&1 || true
 
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
-		ufw_allow "${TELEMT_PORT}/tcp comment 'Telemt MTProxy'"
+		ufw allow "${TELEMT_PORT}/tcp" > /dev/null 2>&1 || true
 	fi
 
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
 		if [[ -n "$BOT_SERVER_IP" ]]; then
-			ufw_allow_from "$BOT_SERVER_IP" "$SOCKS5_PORT" "SOCKS5 from bot"
+			ufw allow from "$BOT_SERVER_IP" to any port "$SOCKS5_PORT" > /dev/null 2>&1 || true
 		else
-			ufw_allow "${SOCKS5_PORT}/tcp comment SOCKS5"
+			ufw allow "${SOCKS5_PORT}/tcp" > /dev/null 2>&1 || true
 			warn "SOCKS5 открыт для всех IP. Рекомендуется ограничить по IP бота"
 		fi
 	fi
 
 	if [[ -n "$BOT_SERVER_IP" ]]; then
-		ufw_allow_from "$BOT_SERVER_IP" "$AGENT_PORT" "proxy-agent from bot"
+		ufw allow from "$BOT_SERVER_IP" to any port "$AGENT_PORT" > /dev/null 2>&1 || true
 	fi
 
 	ufw --force enable > /dev/null

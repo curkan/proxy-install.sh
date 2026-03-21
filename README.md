@@ -78,18 +78,13 @@ bash proxy-install.sh --uninstall
 |---|---|---|
 | Telemt | MTProxy с Fake-TLS маскировкой | 443 |
 | 3proxy | SOCKS5 с логином/паролем | 1080 |
-| proxy-agent | Конфиг и systemd-сервис (бинарник деплоится отдельно) | 8080 |
+| [proxy-agent](https://github.com/curkan/proxy-agent) | HTTP API для управления прокси | 8080 |
 
 Можно поставить оба прокси или только один — скрипт спросит.
 
 ## После установки
 
-Скрипт выведет токен агента и инструкции для деплоя бинарника:
-
-```bash
-scp proxy-agent root@<IP>:/opt/proxy-agent/proxy-agent
-ssh root@<IP> 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-agent && systemctl start proxy-agent'
-```
+Скрипт выведет токен агента — сохрани его. Все компоненты уже запущены и работают, включая proxy-agent (бинарник скачивается автоматически из [GitHub Releases](https://github.com/curkan/proxy-agent/releases)).
 
 ## Структура файлов
 
@@ -101,7 +96,7 @@ ssh root@<IP> 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-a
 /etc/3proxy/3proxy.cfg                 # конфиг 3proxy
 /etc/3proxy/passwd                     # логины/пароли (hot-reload)
 
-/opt/proxy-agent/proxy-agent           # Go-бинарник агента (деплоится отдельно)
+/opt/proxy-agent/proxy-agent           # Go-бинарник агента (скачивается из GitHub)
 /opt/proxy-agent/env                   # переменные окружения (chmod 600)
 
 /etc/sysctl.d/99-proxy-install.conf    # sysctl-параметры

@@ -576,10 +576,39 @@ EOF
 step_agent() {
 	mkdir -p /opt/proxy-agent
 
+	# Создаём системного пользователя
 	if ! id proxy-agent &>/dev/null; then
 		useradd --system --no-create-home --shell /usr/sbin/nologin proxy-agent
 	fi
 
+	# Скачиваем бинарник с GitHub releases
+	local arch="amd64"
+	local binary_name="agent-linux-${arch}"
+	local tmp_binary="/tmp/${binary_name}"
+	local tmp_checksum="/tmp/${binary_name}.sha256"
+	CLEANUP_FILES+=("$tmp_binary" "$tmp_checksum")
+
+	local download_url="https://github.com/curkan/proxy-agent/releases/latest/download"
+
+	wget -qO "$tmp_binary" "${download_url}/${binary_name}"
+	wget -qO "$tmp_checksum" "${download_url}/${binary_name}.sha256"
+
+	# Проверяем checksum
+	local expected_hash
+	expected_hash=$(awk '{print $1}' "$tmp_checksum")
+	local actual_hash
+	actual_hash=$(sha256sum "$tmp_binary" | awk '{print $1}')
+
+	if [[ "$expected_hash" != "$actual_hash" ]]; then
+		echo "Checksum mismatch: expected $expected_hash, got $actual_hash" >&2
+		return 1
+	fi
+
+	mv "$tmp_binary" /opt/proxy-agent/proxy-agent
+	chmod +x /opt/proxy-agent/proxy-agent
+	rm -f "$tmp_checksum"
+
+	# Env-файл
 	cat > /opt/proxy-agent/env << EOF
 AGENT_TOKEN=${AGENT_TOKEN}
 AGENT_PORT=${AGENT_PORT}
@@ -603,7 +632,9 @@ EOF
 	chmod 600 /opt/proxy-agent/env
 	chown proxy-agent:proxy-agent /opt/proxy-agent/env
 	chown proxy-agent:proxy-agent /opt/proxy-agent
+	chown proxy-agent:proxy-agent /opt/proxy-agent/proxy-agent
 
+	# Systemd-сервис
 	cat > /etc/systemd/system/proxy-agent.service << 'EOF'
 [Unit]
 Description=Proxy Agent
@@ -622,6 +653,8 @@ WantedBy=multi-user.target
 EOF
 
 	systemctl daemon-reload
+	systemctl enable proxy-agent
+	systemctl start proxy-agent
 }
 
 step_firewall() {
@@ -696,11 +729,6 @@ print_summary() {
 	echo ""
 
 	warn "Сохрани токен агента в надёжном месте!"
-	echo ""
-
-	echo -e "${BOLD}Следующий шаг — деплой бинарника агента:${NC}"
-	echo -e "  ${CYAN}scp proxy-agent root@${PUBLIC_HOST}:/opt/proxy-agent/proxy-agent${NC}"
-	echo -e "  ${CYAN}ssh root@${PUBLIC_HOST} 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-agent && systemctl start proxy-agent'${NC}"
 }
 
 # ─── Удаление ────────────────────────────────────────────────────────────────

@@ -44,6 +44,8 @@ test-smoke: up
 	docker exec $(CONTAINER) systemctl is-active telemt
 	docker exec $(CONTAINER) systemctl is-active 3proxy
 	docker exec $(CONTAINER) test -f /opt/proxy-agent/env
+	docker exec $(CONTAINER) test -x /opt/proxy-agent/proxy-agent
+	docker exec $(CONTAINER) systemctl is-active proxy-agent
 	docker exec $(CONTAINER) test -f /etc/telemt/telemt.toml
 	docker exec $(CONTAINER) test -f /etc/3proxy/3proxy.cfg
 	docker exec $(CONTAINER) test -f /etc/sysctl.d/99-proxy-install.conf

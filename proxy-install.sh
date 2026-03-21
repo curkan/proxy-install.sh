@@ -420,6 +420,9 @@ print_cli_command() {
 # ─── Шаги установки ─────────────────────────────────────────────────────────
 
 step_system() {
+	# Починить dpkg если был прерван
+	dpkg --configure -a 2>/dev/null || true
+
 	apt-get update -qq
 	apt-get install -y -qq curl wget xxd openssl ufw
 

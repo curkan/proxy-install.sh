@@ -14,13 +14,13 @@
 ## Быстрый старт
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/curkan/proxy-install.sh/main/proxy-install.sh | bash
+wget -qO proxy-install.sh https://raw.githubusercontent.com/curkan/proxy-install.sh/master/proxy-install.sh && bash proxy-install.sh
 ```
 
 или через `curl`:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/curkan/proxy-install.sh/main/proxy-install.sh | bash
+curl -sLO https://raw.githubusercontent.com/curkan/proxy-install.sh/master/proxy-install.sh && bash proxy-install.sh
 ```
 
 Скрипт задаст несколько вопросов и всё настроит сам.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # proxy-install.sh — установщик Telemt + 3proxy + proxy-agent
-# Использование: bash proxy-install.sh
+# Использование: wget -qO proxy-install.sh URL && bash proxy-install.sh
 #
 
 set -euo pipefail
@@ -96,7 +96,7 @@ prompt_yes_no() {
 	local value
 
 	while true; do
-		read -r -p "$(echo -e "${BOLD}${prompt_text}${NC} [y/n, default: ${default}]: ")" value
+		read -r -p "$(echo -e "${BOLD}${prompt_text}${NC} [y/n, default: ${default}]: ")" value < /dev/tty
 		value="${value:-$default}"
 		case "${value,,}" in
 			y|yes) printf -v "$var_name" 'true';  return ;;

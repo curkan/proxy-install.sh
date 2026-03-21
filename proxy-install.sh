@@ -57,7 +57,6 @@ run_step() {
 	local func="$2"
 	STEP_CURRENT=$((STEP_CURRENT + 1))
 
-	# Формируем строку с точками
 	local prefix
 	prefix=$(printf "[%d/%d] %s " "$STEP_CURRENT" "$STEP_TOTAL" "$description")
 	local dots_len=$(( 50 - ${#prefix} ))
@@ -67,26 +66,36 @@ run_step() {
 	local dots
 	dots=$(printf '%*s' "$dots_len" '' | tr ' ' '.')
 
-	# Печатаем без перевода строки
-	echo -ne "${BOLD}${prefix}${NC}${DIM}${dots}${NC} "
+	local line="${BOLD}${prefix}${NC}${DIM}${dots}${NC}"
 
-	# Выполняем функцию, перехватываем вывод
+	# Запускаем функцию в фоне
+	"$func" >> "$STEP_LOG" 2>&1 &
+	local pid=$!
+
+	# Спиннер
+	local spinner=('◰' '◳' '◲' '◱')
+	local i=0
+	while kill -0 "$pid" 2>/dev/null; do
+		echo -ne "\r${line} ${CYAN}${spinner[$i]}${NC}"
+		i=$(( (i + 1) % ${#spinner[@]} ))
+		sleep 0.15
+	done
+
+	# Получаем код выхода
 	local exit_code=0
-	"$func" >> "$STEP_LOG" 2>&1 || exit_code=$?
+	wait "$pid" || exit_code=$?
 
 	if [[ $exit_code -eq 0 ]]; then
-		echo -e "${GREEN}OK${NC}"
+		echo -e "\r${line} ${GREEN}✔${NC}"
 	else
-		echo -e "${RED}FAIL${NC}"
+		echo -e "\r${line} ${RED}✘${NC}"
 		echo ""
-		# Показываем последние строки лога с отступом
 		echo -e "${RED}  Вывод:${NC}"
 		tail -20 "$STEP_LOG" | sed 's/^/    /'
 		echo ""
 		die "Шаг '$description' завершился с ошибкой (код $exit_code)"
 	fi
 
-	# Очищаем лог для следующего шага
 	: > "$STEP_LOG"
 }
 

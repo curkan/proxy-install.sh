@@ -27,6 +27,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
 # ─── Вспомогательные функции ──────────────────────────────────────────────────
@@ -38,6 +39,57 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die()     { error "$*"; exit 1; }
 header()  { echo -e "\n${BOLD}${BLUE}━━━ $* ━━━${NC}\n"; }
 
+# ─── Step runner ─────────────────────────────────────────────────────────────
+
+STEP_CURRENT=0
+STEP_TOTAL=0
+STEP_LOG=""
+
+step_init() {
+	STEP_TOTAL="$1"
+	STEP_CURRENT=0
+	STEP_LOG=$(mktemp /tmp/proxy-install-log.XXXXXX)
+	CLEANUP_FILES+=("$STEP_LOG")
+}
+
+run_step() {
+	local description="$1"
+	local func="$2"
+	STEP_CURRENT=$((STEP_CURRENT + 1))
+
+	# Формируем строку с точками
+	local prefix
+	prefix=$(printf "[%d/%d] %s " "$STEP_CURRENT" "$STEP_TOTAL" "$description")
+	local dots_len=$(( 50 - ${#prefix} ))
+	if [[ $dots_len -lt 3 ]]; then
+		dots_len=3
+	fi
+	local dots
+	dots=$(printf '%*s' "$dots_len" '' | tr ' ' '.')
+
+	# Печатаем без перевода строки
+	echo -ne "${BOLD}${prefix}${NC}${DIM}${dots}${NC} "
+
+	# Выполняем функцию, перехватываем вывод
+	local exit_code=0
+	"$func" >> "$STEP_LOG" 2>&1 || exit_code=$?
+
+	if [[ $exit_code -eq 0 ]]; then
+		echo -e "${GREEN}OK${NC}"
+	else
+		echo -e "${RED}FAIL${NC}"
+		echo ""
+		# Показываем последние строки лога с отступом
+		echo -e "${RED}  Вывод:${NC}"
+		tail -20 "$STEP_LOG" | sed 's/^/    /'
+		echo ""
+		die "Шаг '$description' завершился с ошибкой (код $exit_code)"
+	fi
+
+	# Очищаем лог для следующего шага
+	: > "$STEP_LOG"
+}
+
 # ─── Cleanup при ошибке ─────────────────────────────────────────────────────
 
 CLEANUP_FILES=()
@@ -47,7 +99,7 @@ cleanup() {
 	for f in "${CLEANUP_FILES[@]}"; do
 		rm -f "$f" 2>/dev/null
 	done
-	if [[ $exit_code -ne 0 ]]; then
+	if [[ $exit_code -ne 0 && $exit_code -ne 130 ]]; then
 		echo ""
 		error "Скрипт завершился с ошибкой (код $exit_code)"
 		error "Проверь вывод выше для диагностики"
@@ -120,7 +172,6 @@ get_public_ip() {
 	ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
 	     curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
 	     echo "")
-	# Валидация: только IPv4
 	if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 		echo "$ip"
 	else
@@ -217,7 +268,6 @@ parse_args() {
 		esac
 	done
 
-	# Если передан хотя бы --host, считаем CLI-режим
 	if [[ -n "${PUBLIC_HOST:-}" ]]; then
 		CLI_MODE="true"
 	fi
@@ -275,7 +325,6 @@ collect_config_interactive() {
 	prompt_yes_no INSTALL_TELEMT "Установить Telemt (MTProxy)?" "y"
 	prompt_yes_no INSTALL_SOCKS5 "Установить 3proxy (SOCKS5)?"  "y"
 
-	# Валидация
 	validate_all_inputs
 
 	echo ""
@@ -295,19 +344,16 @@ collect_config_interactive() {
 }
 
 collect_config_cli() {
-	# Дефолты для не указанных параметров
 	TELEMT_PORT="${TELEMT_PORT:-$TELEMT_PORT_DEFAULT}"
 	SOCKS5_PORT="${SOCKS5_PORT:-$SOCKS5_PORT_DEFAULT}"
 	AGENT_PORT="${AGENT_PORT:-$AGENT_PORT_DEFAULT}"
 	INSTALL_TELEMT="${INSTALL_TELEMT:-true}"
 	INSTALL_SOCKS5="${INSTALL_SOCKS5:-true}"
 
-	# Обязательные параметры
 	[[ -z "${PUBLIC_HOST:-}" ]]   && die "Не указан --host"
 	[[ -z "${TLS_DOMAIN:-}" ]]    && die "Не указан --tls-domain"
 	[[ -z "${BOT_SERVER_IP:-}" ]] && die "Не указан --bot-ip"
 
-	# Валидация
 	validate_all_inputs
 
 	AGENT_TOKEN=$(openssl rand -hex 32)
@@ -362,18 +408,12 @@ print_cli_command() {
 	echo ""
 }
 
-# ─── Системные настройки ──────────────────────────────────────────────────────
+# ─── Шаги установки ─────────────────────────────────────────────────────────
 
-setup_system() {
-	header "Системные настройки"
-
-	info "Обновляем пакеты..."
+step_system() {
 	apt-get update -qq
-
-	info "Устанавливаем зависимости..."
 	apt-get install -y -qq curl wget xxd openssl ufw
 
-	info "Настраиваем лимиты файловых дескрипторов..."
 	cat > /etc/security/limits.d/99-proxy-install.conf << 'EOF'
 nobody  soft  nofile  65536
 nobody  hard  nofile  65536
@@ -387,16 +427,9 @@ net.ipv4.tcp_tw_reuse = 1
 net.core.somaxconn = 65535
 EOF
 	sysctl --system -q
-
-	success "Системные настройки применены"
 }
 
-# ─── Установка Telemt ─────────────────────────────────────────────────────────
-
-install_telemt() {
-	header "Установка Telemt (MTProxy)"
-
-	info "Скачиваем бинарник Telemt..."
+step_telemt() {
 	local libc_type
 	libc_type=$(detect_libc)
 	local arch
@@ -411,12 +444,9 @@ install_telemt() {
 	mv /tmp/telemt /usr/local/bin/telemt
 	chmod +x /usr/local/bin/telemt
 	rm -f "$tmp_archive"
-	success "Telemt установлен: $(/usr/local/bin/telemt --version 2>/dev/null || echo 'ok')"
 
-	info "Создаём конфигурацию..."
 	mkdir -p /etc/telemt /var/lib/telemt
 
-	# Первый пользователь-заглушка, бот заменит через API
 	local first_key
 	first_key=$(openssl rand -hex 16)
 	local first_user="u_${first_key:0:8}"
@@ -461,7 +491,6 @@ EOF
 	chmod 640 /etc/telemt/telemt.toml
 	chown nobody:nogroup /var/lib/telemt
 
-	info "Создаём systemd-сервис..."
 	cat > /etc/systemd/system/telemt.service << 'EOF'
 [Unit]
 Description=Telemt MTProxy
@@ -485,19 +514,10 @@ EOF
 
 	systemctl daemon-reload
 	systemctl enable telemt
-
-	if ! systemctl start telemt; then
-		die "Telemt не запустился. Проверь: journalctl -u telemt -n 20"
-	fi
-	success "Telemt запущен"
+	systemctl start telemt
 }
 
-# ─── Установка 3proxy ─────────────────────────────────────────────────────────
-
-install_3proxy() {
-	header "Установка 3proxy (SOCKS5)"
-
-	info "Скачиваем 3proxy ${PROXY_3PROXY_VERSION}..."
+step_3proxy() {
 	local tmp_deb="/tmp/3proxy.deb"
 	CLEANUP_FILES+=("$tmp_deb")
 
@@ -507,13 +527,11 @@ install_3proxy() {
 	dpkg -i "$tmp_deb" > /dev/null 2>&1 || apt-get install -f -y -qq
 	rm -f "$tmp_deb"
 
-	# Проверяем что пакет установлен
 	if ! dpkg -s 3proxy &>/dev/null; then
-		die "3proxy не установился. Проверь вывод выше"
+		echo "3proxy package not found after install" >&2
+		return 1
 	fi
-	success "3proxy установлен"
 
-	info "Создаём конфигурацию..."
 	mkdir -p /etc/3proxy /usr/local/3proxy/logs /usr/local/3proxy/count
 	touch /etc/3proxy/passwd
 
@@ -540,21 +558,12 @@ flush
 EOF
 
 	systemctl enable 3proxy
-
-	if ! systemctl start 3proxy; then
-		die "3proxy не запустился. Проверь: journalctl -u 3proxy -n 20"
-	fi
-	success "3proxy запущен на порту ${SOCKS5_PORT}"
+	systemctl start 3proxy
 }
 
-# ─── Подготовка proxy-agent ───────────────────────────────────────────────────
-
-setup_agent() {
-	header "Подготовка proxy-agent"
-
+step_agent() {
 	mkdir -p /opt/proxy-agent
 
-	# Создаём системного пользователя для агента
 	if ! id proxy-agent &>/dev/null; then
 		useradd --system --no-create-home --shell /usr/sbin/nologin proxy-agent
 	fi
@@ -564,7 +573,6 @@ AGENT_TOKEN=${AGENT_TOKEN}
 AGENT_PORT=${AGENT_PORT}
 EOF
 
-	# Включаем бэкенды по выбору (можно оба)
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
 		cat >> /opt/proxy-agent/env << EOF
 TELEMT_API_URL=http://127.0.0.1:9091
@@ -576,7 +584,6 @@ EOF
 SOCKS5_PASSWD_FILE=/etc/3proxy/passwd
 SOCKS5_PID_FILE=/var/run/3proxy.pid
 EOF
-		# Даём proxy-agent доступ к файлу паролей
 		chown root:proxy-agent /etc/3proxy/passwd
 		chmod 660 /etc/3proxy/passwd
 	fi
@@ -603,18 +610,9 @@ WantedBy=multi-user.target
 EOF
 
 	systemctl daemon-reload
-
-	info "Бинарник агента (/opt/proxy-agent/proxy-agent) нужно скопировать отдельно:"
-	echo -e "  ${CYAN}scp proxy-agent root@${PUBLIC_HOST}:/opt/proxy-agent/proxy-agent${NC}"
-	echo -e "  ${CYAN}ssh root@${PUBLIC_HOST} 'chmod +x /opt/proxy-agent/proxy-agent && systemctl enable proxy-agent && systemctl start proxy-agent'${NC}"
-	success "Конфигурация агента готова"
 }
 
-# ─── Настройка firewall ───────────────────────────────────────────────────────
-
-setup_firewall() {
-	header "Настройка firewall (ufw)"
-
+step_firewall() {
 	ufw default deny incoming > /dev/null
 	ufw default allow outgoing > /dev/null
 
@@ -629,7 +627,6 @@ setup_firewall() {
 			ufw allow from "$BOT_SERVER_IP" to any port "$SOCKS5_PORT" > /dev/null 2>&1 || true
 		else
 			ufw allow "${SOCKS5_PORT}/tcp" > /dev/null 2>&1 || true
-			warn "SOCKS5 открыт для всех IP. Рекомендуется ограничить по IP бота"
 		fi
 	fi
 
@@ -638,36 +635,34 @@ setup_firewall() {
 	fi
 
 	ufw --force enable > /dev/null
-	success "Firewall настроен"
 }
 
 # ─── Итоговый вывод ───────────────────────────────────────────────────────────
 
 print_summary() {
-	header "Установка завершена"
-
+	echo ""
 	echo -e "${BOLD}Параметры подключения:${NC}"
 	echo ""
 
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
-		echo -e "${BOLD}Telemt (MTProxy):${NC}"
-		echo -e "  Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
-		echo -e "  Порт:    ${CYAN}${TELEMT_PORT}${NC}"
-		echo -e "  Ссылки:  ${CYAN}journalctl -u telemt | grep 'EE-TLS\|DD:'${NC}"
+		echo -e "  ${BOLD}Telemt (MTProxy):${NC}"
+		echo -e "    Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
+		echo -e "    Порт:    ${CYAN}${TELEMT_PORT}${NC}"
+		echo -e "    Ссылки:  ${CYAN}journalctl -u telemt | grep 'EE-TLS\|DD:'${NC}"
 		echo ""
 	fi
 
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
-		echo -e "${BOLD}3proxy (SOCKS5):${NC}"
-		echo -e "  Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
-		echo -e "  Порт:    ${CYAN}${SOCKS5_PORT}${NC}"
-		echo -e "  Пароли:  ${CYAN}/etc/3proxy/passwd${NC}"
+		echo -e "  ${BOLD}3proxy (SOCKS5):${NC}"
+		echo -e "    Сервер:  ${CYAN}${PUBLIC_HOST}${NC}"
+		echo -e "    Порт:    ${CYAN}${SOCKS5_PORT}${NC}"
+		echo -e "    Пароли:  ${CYAN}/etc/3proxy/passwd${NC}"
 		echo ""
 	fi
 
-	echo -e "${BOLD}proxy-agent:${NC}"
-	echo -e "  Порт:     ${CYAN}${AGENT_PORT}${NC}"
-	echo -e "  Токен:    ${CYAN}${AGENT_TOKEN}${NC}"
+	echo -e "  ${BOLD}proxy-agent:${NC}"
+	echo -e "    Порт:     ${CYAN}${AGENT_PORT}${NC}"
+	echo -e "    Токен:    ${CYAN}${AGENT_TOKEN}${NC}"
 	local backends=""
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
 		backends+="telemt"
@@ -675,17 +670,17 @@ print_summary() {
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
 		backends+="${backends:+, }socks5"
 	fi
-	echo -e "  Бэкенды: ${CYAN}${backends}${NC}"
+	echo -e "    Бэкенды: ${CYAN}${backends}${NC}"
 	echo ""
 
-	echo -e "${BOLD}Конфиги:${NC}"
+	echo -e "  ${BOLD}Конфиги:${NC}"
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
-		echo -e "  ${CYAN}/etc/telemt/telemt.toml${NC}"
+		echo -e "    ${CYAN}/etc/telemt/telemt.toml${NC}"
 	fi
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
-		echo -e "  ${CYAN}/etc/3proxy/3proxy.cfg${NC}"
+		echo -e "    ${CYAN}/etc/3proxy/3proxy.cfg${NC}"
 	fi
-	echo -e "  ${CYAN}/opt/proxy-agent/env${NC}"
+	echo -e "    ${CYAN}/opt/proxy-agent/env${NC}"
 	echo ""
 
 	warn "Сохрани токен агента в надёжном месте!"
@@ -701,7 +696,6 @@ print_summary() {
 uninstall() {
 	header "Удаление proxy-install"
 
-	# Telemt
 	if systemctl is-active --quiet telemt 2>/dev/null; then
 		info "Останавливаю Telemt..."
 		systemctl stop telemt
@@ -713,7 +707,6 @@ uninstall() {
 	rm -f /usr/local/bin/telemt
 	rm -rf /etc/telemt /var/lib/telemt
 
-	# 3proxy
 	if systemctl is-active --quiet 3proxy 2>/dev/null; then
 		info "Останавливаю 3proxy..."
 		systemctl stop 3proxy
@@ -723,7 +716,6 @@ uninstall() {
 	fi
 	rm -rf /etc/3proxy
 
-	# proxy-agent
 	if systemctl is-active --quiet proxy-agent 2>/dev/null; then
 		info "Останавливаю proxy-agent..."
 		systemctl stop proxy-agent
@@ -734,12 +726,10 @@ uninstall() {
 	fi
 	rm -rf /opt/proxy-agent
 
-	# Системный пользователь
 	if id proxy-agent &>/dev/null; then
 		userdel proxy-agent 2>/dev/null || true
 	fi
 
-	# Drop-in конфиги
 	rm -f /etc/sysctl.d/99-proxy-install.conf
 	rm -f /etc/security/limits.d/99-proxy-install.conf
 
@@ -777,17 +767,35 @@ main() {
 		collect_config_interactive
 	fi
 
-	setup_system
-
+	# Считаем шаги
+	local total=3  # system + agent + firewall
 	if [[ "$INSTALL_TELEMT" == "true" ]]; then
-		install_telemt
+		total=$((total + 1))
 	fi
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
-		install_3proxy
+		total=$((total + 1))
 	fi
 
-	setup_agent
-	setup_firewall
+	step_init "$total"
+
+	echo -e "${BOLD}Установка:${NC}"
+	echo ""
+
+	run_step "Системные настройки"   step_system
+
+	if [[ "$INSTALL_TELEMT" == "true" ]]; then
+		run_step "Установка Telemt"   step_telemt
+	fi
+	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
+		run_step "Установка 3proxy"   step_3proxy
+	fi
+
+	run_step "Подготовка proxy-agent" step_agent
+	run_step "Настройка firewall"     step_firewall
+
+	echo ""
+	echo -e "${GREEN}${BOLD}Установка завершена успешно!${NC}"
+
 	print_summary
 }
 

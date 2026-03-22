@@ -625,7 +625,8 @@ EOF
 SOCKS5_PASSWD_FILE=/etc/3proxy/passwd
 SOCKS5_PID_FILE=/var/run/3proxy.pid
 EOF
-		chown root:proxy-agent /etc/3proxy/passwd
+		chown root:proxy-agent /etc/3proxy /etc/3proxy/passwd
+		chmod 775 /etc/3proxy
 		chmod 660 /etc/3proxy/passwd
 	fi
 
@@ -668,11 +669,7 @@ step_firewall() {
 	fi
 
 	if [[ "$INSTALL_SOCKS5" == "true" ]]; then
-		if [[ -n "$BOT_SERVER_IP" ]]; then
-			ufw allow from "$BOT_SERVER_IP" to any port "$SOCKS5_PORT" > /dev/null 2>&1 || true
-		else
-			ufw allow "${SOCKS5_PORT}/tcp" > /dev/null 2>&1 || true
-		fi
+		ufw allow "${SOCKS5_PORT}/tcp" > /dev/null 2>&1 || true
 	fi
 
 	if [[ -n "$BOT_SERVER_IP" ]]; then

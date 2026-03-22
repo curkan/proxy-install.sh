@@ -526,7 +526,7 @@ EOF
 
 	systemctl daemon-reload
 	systemctl enable telemt
-	systemctl start telemt
+	systemctl restart telemt
 }
 
 step_3proxy() {
@@ -570,7 +570,7 @@ flush
 EOF
 
 	systemctl enable 3proxy
-	systemctl start 3proxy
+	systemctl restart 3proxy
 }
 
 step_agent() {
@@ -648,6 +648,8 @@ EnvironmentFile=/opt/proxy-agent/env
 ExecStart=/opt/proxy-agent/proxy-agent
 Restart=always
 RestartSec=5
+AmbientCapabilities=CAP_KILL
+CapabilityBoundingSet=CAP_KILL
 
 [Install]
 WantedBy=multi-user.target
@@ -655,7 +657,7 @@ EOF
 
 	systemctl daemon-reload
 	systemctl enable proxy-agent
-	systemctl start proxy-agent
+	systemctl restart proxy-agent
 }
 
 step_firewall() {
